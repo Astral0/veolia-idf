@@ -6,7 +6,6 @@ VEOLIA_LOGIN=$1
 VEOLIA_PASSWORD=$2
 VEOLIA_CONTRACT=$3
 
-
 echo " >>>> Installation de Veolia-idf <<<<"
 
 # Get current directory
