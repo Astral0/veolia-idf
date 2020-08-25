@@ -13,6 +13,15 @@ set_root $0
 
 export PYTHONPATH=${root}/lib/
 
+
+# Check for ghost sessions
+is_xvfb=$(ps -ef | grep 'Xvfb :99' | grep -v grep | awk '{print $2}')
+if [ ! -z "${is_xvfb}" ]; then
+    ps -ef | grep 'Xvfb :99' | grep -v grep | awk '{print $2}' | xargs -r kill -9
+fi
+
+
+# Run
 cd $root/
 xvfb-run timeout --signal=SIGINT ${timeout} python3 $root/veolia-idf-domoticz.py -d --run $*
 codret=$?
