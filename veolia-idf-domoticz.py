@@ -21,6 +21,10 @@
 # 
 #
 VERSION="v1.2"
+
+use_domoticz=False
+
+
 ################################################################################
 # SCRIPT DEPENDENCIES 
 ################################################################################
@@ -851,20 +855,24 @@ if __name__ == '__main__':
         # Create objects
         try:
             veolia = VeoliaCrawler(configuration_json, super_print=o.print, debug=args.debug)
-            domoticz = DomoticzInjector(configuration_json, super_print=o.print, debug=args.debug)
+            if use_domoticz:
+                domoticz = DomoticzInjector(configuration_json, super_print=o.print, debug=args.debug)
+            else:
+                domoticz = False
         except Exception as e:
             exit_on_error(string = str(e))
-        
+
         # Check requirements
         try:
             veolia.sanity_check()
         except Exception as e:
             exit_on_error(veolia, domoticz, str(e))
 
-        try:
-            domoticz.sanity_check()
-        except Exception as e:
-            exit_on_error(veolia, domoticz, str(e))
+        if use_domoticz:
+            try:
+                domoticz.sanity_check()
+            except Exception as e:
+                exit_on_error(veolia, domoticz, str(e))
 
         try:
             veolia.init_browser_firefox()
@@ -881,10 +889,11 @@ if __name__ == '__main__':
             except Exception as e:
                 exit_on_error(veolia, domoticz, str(e))
 
-        try:
-            domoticz.update_device(data_file)
-        except Exception as e:
-            exit_on_error(veolia, domoticz, str(e))
+        if use_domoticz:
+            try:
+                domoticz.update_device(data_file)
+            except Exception as e:
+                exit_on_error(veolia, domoticz, str(e))
 
         veolia.clean_up()
         o.print("Finished on success")
