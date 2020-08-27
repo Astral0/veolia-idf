@@ -22,14 +22,13 @@
 #
 VERSION="v1.2"
 
-use_domoticz=False
-
 
 ################################################################################
 # SCRIPT DEPENDENCIES 
 ################################################################################
 
 try:
+    import sys
     import argparse
     import base64
     from   colorama import Fore, Style
@@ -53,13 +52,21 @@ try:
     from   shutil import which
     import signal
     import subprocess
-    import sys
     import time
     import urllib3
     from   urllib.parse import urlencode
+    import pprint
+    from interruptingcow import timeout
 except ImportError as e:
     print("Error: failed to import python required module : " + str(e), file=sys.stderr)
     sys.exit(2)
+
+try:
+    import paho.mqtt.client as mqtt
+    is_mqtt=True
+except:
+    is_mqtt=False
+
 
 ################################################################################
 # Output Class in charge of managing all script output to file or console
@@ -377,25 +384,39 @@ class VeoliaCrawler():
 
     def clean_up(self):
         self.print("Close Browser", end="") #############################################################
+        tout=int(self.configuration["timeout"])
+        #tout=600
         if self.__browser:
             try:
-                self.__browser.quit()
-            except Exception as e:
+                with timeout(tout, exception=RuntimeError):
+                    try:
+                        self.__browser.quit()
+                    except Exception as e:
+                        os.kill(self.__browser.service.process.pid, signal.SIGTERM)
+                        self.print("selenium didnt properly close the process, so we kill firefox manually (pid=" + str(self.__browser.service.process.pid) + ")", "WW")
+                    else:
+                        self.print(st = "OK")
+            except RuntimeError:
                 os.kill(self.__browser.service.process.pid, signal.SIGTERM)
                 self.print("selenium didnt properly close the process, so we kill firefox manually (pid=" + str(self.__browser.service.process.pid) + ")", "WW")
-            else:
-                self.print(st = "OK")
         else:
             self.print(st = "OK")
  
         self.print("Close Display", end="") #############################################################
+        tout=int(self.configuration["timeout"])
+        #tout=600
         if self.__display:
             try:
-                self.__display.stop()
-            except:
-                raise
-            else:
-                self.print(st="ok")
+                with timeout(tout, exception=RuntimeError):
+                    try:
+                        self.__display.stop()
+                    except:
+                        pass
+                    else:
+                        self.print(st="ok")
+            except RuntimeError:
+                self.print("Display wasn't closed in %s seconds.. Closing manually" % self.configuration["timeout"], "WW")
+
 
         # Remove downloaded file
         try:
@@ -408,7 +429,8 @@ class VeoliaCrawler():
             
                 # Remove file
                 try:
-                    os.remove(self.__full_path_download_file)
+                    #os.remove(self.__full_path_download_file)
+                    pass
                 except Exception as e:
                     self.print(str(e),st="EE")
                 else:
@@ -416,7 +438,7 @@ class VeoliaCrawler():
         pass
 
     def get_file(self):
-         
+
         self.print('Connexion au site Veolia Eau Ile de France', end="") #############################################################
         try:
             self.__browser.get(self.__class__.site_url)
@@ -654,9 +676,6 @@ class DomoticzInjector():
                 self.print(st = "OK")
 
 
-
-
-
     def sanity_check(self):
         self.print("Check domoticz connectivity", end="") #############################################################
         response = self.open_url('/json.htm?type=command&param=getversion')
@@ -767,6 +786,136 @@ class DomoticzInjector():
     def clean_up(self):
         pass
 
+
+
+
+
+################################################################################
+# Object injects historical data into MQTT
+################################################################################
+class MQTTInjector():
+    
+    def __init__(self, configuration_json, super_print, debug = False):
+        self.__debug = debug
+
+        # Supersede local print function if provided as an argument
+        self.print = super_print if super_print else self.print
+
+        self.configuration = {
+            # Mandatory config values
+            'mqtt_user'     : "",
+            'mqtt_pass'     : "",
+            'mqtt_ip'       : "",
+            'mqtt_port'     : "",
+        }
+        self.print("Start Loading MQTT configuration")
+        try:
+            self.__load_configuration_items(configuration_json)
+            self.print("End loading MQTT configuration", end="")
+        except Exception:
+            raise
+        else:
+            self.print(st="ok")
+        pass
+
+
+    # Load configuration items
+    def __load_configuration_items(self, configuration_json):
+        for param in list((self.configuration).keys()):
+            if param not in configuration_json:
+                if self.configuration[param] is not None:
+                    self.print('    "' + param + '" = "' + self.configuration[param] + '"', end="") 
+                    self.print("param is not found in config file, using default value","WW")
+                else:
+                    self.print('    "' + param + '"', end="") 
+                    raise RuntimeError("param is missing in " + self.__configuration_file)
+            else:
+                if param == "download_folder" and configuration_json[param][-1] != os.path.sep:
+                    self.configuration[param] = configuration_json[param] + os.path.sep
+                else:
+                    self.configuration[param] = configuration_json[param]
+
+                if param == "mqtt_pass":
+                    self.print('    "' + param + '" = "' + "*"*len(self.configuration[param]) + '"', end="") 
+                else:
+                    self.print('    "' + param + '" = "' + self.configuration[param] + '"', end="") 
+
+                self.print(st = "OK")
+
+
+
+    def update_device(self, data_file):
+        self.csv2json(data_file)
+        self.send_mqtt_message(self.last_data)
+
+
+    def csv2json(self, data_file):
+        self.print("CSV to JSON", end="") #############################################################
+
+        # create a dictionary 
+        self.data = {}
+        self.data['history']=[]
+
+        try:
+            with open(data_file, 'r') as f:
+                # Parse each line of the file. 
+                for row in list(csv.reader(f, delimiter=';')):
+                    date      = row[0][0:10]
+                    date_time = row[0]
+                    counter   = row[1]
+                    conso     = row[2]
+                    #print("date: %s -- date_time: %s -- releves: %s -- conso: %s" % (date, date_time, counter, conso) )
+                    self.data['history'].append( {"date":date, "date_time": date_time, "counter": counter, "conso":conso} )
+                #self.last_data={"date":date, "date_time": date_time, "counter": counter, "conso":conso}
+                self.last_data=self.data['history'][-1]
+                #pprint.pprint(self.data)
+        except Exception:
+            raise
+        else:
+            self.print(st="ok")
+
+
+
+    def send_mqtt_message(self, msg=""):
+        self.print("Sending message to MQTT broker", end="") #############################################################
+
+        # The callback for when the client receives a CONNACK response from the server.
+        def on_connect(client, userdata, flags, rc):
+            print("Connected with result code "+str(rc))
+
+            # Subscribing in on_connect() means that if we lose the connection and
+            # reconnect then subscriptions will be renewed.
+            client.subscribe("$SYS/#")
+
+        # The callback for when a PUBLISH message is received from the server.
+        def on_message(client, userdata, msg):
+            print(msg.topic+" "+str(msg.payload))
+
+        try:
+            mqtt_ip   = self.configuration['mqtt_ip'] 
+            mqtt_port = int(self.configuration['mqtt_port'])
+            mqtt_user = self.configuration['mqtt_user'] 
+            mqtt_pass = self.configuration['mqtt_pass'] 
+            client = mqtt.Client()
+            client.on_connect = on_connect
+            client.on_message = on_message
+            client.username_pw_set(username=mqtt_user,password=mqtt_pass)
+            client.connect(mqtt_ip, mqtt_port, 60)
+            msg=json.dumps(msg)
+            ret=client.publish("veolia/last_data",msg)
+        except Exception as e:
+            exit_on_error(str(e))
+
+        self.print(st = "OK")
+
+    def clean_up(self):
+        pass
+
+
+################################################################################
+################################################################################
+
+
 def exit_on_error(veolia=None, domoticz=None, string=""):
     try:
         o
@@ -814,13 +963,18 @@ if __name__ == '__main__':
 
 
         # COMMAND LINE OPTIONS
-        parser = argparse.ArgumentParser(description="Load water consumption from veolia Ile de France into domoticz")
+        parser = argparse.ArgumentParser(description="Load water consumption from veolia Ile de France into domoticz or MQTT")
         parser.add_argument("-v", "--version", action="store_true",help="script version")
         parser.add_argument("-d", "--debug", action="store_true",help="active graphical debug mode (only for troubleshooting)")
         parser.add_argument("-l", "--logs-folder", help="specify the logs location folder (" + default_logfolder + ")", default=default_logfolder, nargs=1)
         parser.add_argument("-c", "--config", help="specify configuration location (" + default_configuration_file + ")", default=default_configuration_file, nargs=1)
+        parser.add_argument("--domoticz", action="store_true",help="use Domoticz", required=False)
+        parser.add_argument("--mqtt", action="store_true",help="use MQTT", required=False)
         parser.add_argument("-r", "--run", action="store_true",help="run the script", required=True)
         args = parser.parse_args()
+
+        if args.mqtt and not is_mqtt:
+            exit_on_error(string = "Error! paho.mqtt not installed!")
 
         # VERSION
         if args.version:
@@ -855,10 +1009,18 @@ if __name__ == '__main__':
         # Create objects
         try:
             veolia = VeoliaCrawler(configuration_json, super_print=o.print, debug=args.debug)
-            if use_domoticz:
+
+            if args.domoticz:
                 domoticz = DomoticzInjector(configuration_json, super_print=o.print, debug=args.debug)
             else:
                 domoticz = False
+
+            if args.mqtt:
+                mqtt_obj = MQTTInjector(configuration_json, super_print=o.print, debug=args.debug)
+            else:
+                mqtt_obj = False
+
+
         except Exception as e:
             exit_on_error(string = str(e))
 
@@ -868,11 +1030,13 @@ if __name__ == '__main__':
         except Exception as e:
             exit_on_error(veolia, domoticz, str(e))
 
-        if use_domoticz:
+        if args.domoticz:
             try:
                 domoticz.sanity_check()
             except Exception as e:
                 exit_on_error(veolia, domoticz, str(e))
+
+        #mqtt_obj.update_device(data_file="/root/vvv/veolia-idf/historique_jours_litres.csv")
 
         try:
             veolia.init_browser_firefox()
@@ -880,20 +1044,31 @@ if __name__ == '__main__':
             exit_on_error(veolia, domoticz, str(e))
 
         try:
-            data_file = veolia.get_file()
+            # if os.path.exists(veolia.__full_path_download_file):
+                # data_file = veolia.__full_path_download_file
+            # else:
+               data_file = veolia.get_file()
         except Exception as e:
-            # REtry once on failure to manage stalement exception that occur sometimes
+            # Retry once on failure to manage stalement exception that occur sometimes
             try:
                 o.print("Encountered error" + str(e).rstrip() + "// -> Retrying once",st="ww")
                 data_file = veolia.get_file()
             except Exception as e:
                 exit_on_error(veolia, domoticz, str(e))
 
-        if use_domoticz:
+
+        if args.domoticz:
             try:
                 domoticz.update_device(data_file)
             except Exception as e:
                 exit_on_error(veolia, domoticz, str(e))
+
+        if args.mqtt:
+            try:
+                mqtt_obj.update_device(data_file)
+            except Exception as e:
+                exit_on_error(str(e))
+
 
         veolia.clean_up()
         o.print("Finished on success")

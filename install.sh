@@ -76,7 +76,7 @@ chmod ugo+x veolia-idf-domoticz.py
 
 
 # Adjust config file
-cd ${HOME_VEOLIA}
+cd ${root}
 cp -ax config.json.exemple config.json
 #
 if [ ! -z $VEOLIA_LOGIN ]; then
@@ -95,6 +95,10 @@ fi
 # Install prerequisites
 pip3 install --upgrade pip
 pip3 install --no-cache-dir -r requirements.txt -t ${root}/lib
+pip3 install --no-cache-dir paho.mqtt -t ${root}/lib
+pip3 install --no-cache-dir interruptingcow  -t ${root}/lib
+
+
 #
 chmod 755 ${root}/bin/run.sh
 
